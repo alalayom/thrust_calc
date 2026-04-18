@@ -1,16 +1,47 @@
+# =========================
 # Python
+# =========================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
 
+# =========================
 # VSCode
+# =========================
 .vscode/
 
-# Data outputs
-data/*.csv
-data/*.png
-
+# =========================
 # OS files
+# =========================
 .DS_Store
 Thumbs.db
+
+# =========================
+# Data outputs
+# =========================
+data/raw/*.csv
+data/processed/*.csv
+data/plots/*.png
+data/exports/*
+
+# keep folder structure
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/plots/.gitkeep
+
+# =========================
+# Arduino build files
+# =========================
+*.ino.cpp
+*.ino.hex
+*.elf
+*.bin
+*.map
+
+# =========================
+# Logs
+# =========================
+*.log
