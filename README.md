@@ -8,6 +8,7 @@ This project consists of two main parts:
 ---
 
 ## Project Structure
+```text
 thrust_calc/
 ├─ arduino/
 │ ├─ calibration/
@@ -30,6 +31,7 @@ thrust_calc/
 │
 ├─ docs/
 └─ README.md
+```
 
 ## Requirements
 - Arduino IDE
@@ -43,9 +45,9 @@ Install using:
 pip install -r requirements.txt
 ```
 
-# 1. Calibration
+## 1. Calibration
 Upload:
-```bash
+```text
 arduino/calibration/calibration.ino
 ```
 
@@ -56,20 +58,21 @@ Steps:
 4. Enter the weight value (e.g. 500.0)
 5. Press y to save calibration value to EEPROM
 
-# 2. Measurement Mode
+## 2. Measurement Mode
 Upload:
-```bash
+```text
 arduino/thrust_logger/thrust_logger.ino
 ```
 
-This firmware reads calibration value from EEPROM and continuously outputs data in CSV format as time_ms,mass_g
+This firmware reads calibration value from EEPROM and continuously outputs data in CSV format as time_ms,mass_g.
+
 Example:
-```bash
+```text
 1234,512.3
 1245,514.1
 ```
 
-# Python Usage
+## Python Usage
 Before running Python:
 
 1. Close Arduino Serial Monitor
@@ -77,42 +80,41 @@ Before running Python:
 3. Make sure no other program is using the serial port
 4. Run Data Collection
 ```bash
-    python python/main.py
+python python/main.py
 ```
 
-# Behavior
--> Script starts collecting data immediately
--> Runs continuously
--> Stop manually using:
+## Behavior
+- Script starts collecting data immediately
+- Runs continuously
+- Stop manually using:
 ```bash
 Ctrl + C
 ```
 
-# Output Files
+## Output Files
 After stopping the script, the following files are generated:
 
 Raw data
-```bash
+```text
 data/raw/<timestamp>_raw.csv
 ```
 
 Processed data
-```bash
+```text
 data/processed/<timestamp>_processed.csv
 ```
 
 Plot
-```bash
+```text
 data/plots/<timestamp>_thrust.png
 ```
 
+## Calculated Metrics
+- Max thrust (N)
+- Burn time (s) 
+- Total impulse (N·s)
 
-# Calculated Metrics
-Max thrust (N)
-Burn time (s)
-Total impulse (N·s)
-
-# Workflow Summary
+## Workflow Summary
 1. Calibrate sensor (once)
 2. Upload thrust_logger firmware
 3. Run Python script
@@ -120,8 +122,8 @@ Total impulse (N·s)
 5. Stop script manually
 6. Analyze results
 
-# Notes
-Ensure load cell is unloaded during startup if auto-tare is enabled
-Data accuracy depends on mechanical stability
-HX711 sampling rate is limited (~80 Hz max)
-Noise may be present; filtering can be added later
+## Notes
+- Ensure load cell is unloaded during startup if auto-tare is enabled
+- Data accuracy depends on mechanical stability
+- HX711 sampling rate is limited (~80 Hz max)
+- Noise may be present; filtering can be added later
