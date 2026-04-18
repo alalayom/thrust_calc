@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# VSCode
+.vscode/
+
+# Data outputs
+data/*.csv
+data/*.png
+
+# OS files
+.DS_Store
+Thumbs.db
