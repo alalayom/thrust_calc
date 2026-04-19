@@ -13,18 +13,23 @@ from plot_data import save_thrust_plot
 def main() -> None:
     tPort = "COM4"
     tBaudrate = 57600
+    tWarmupDurationS = 5.0
 
-    ensure_directories()
+    tProjectRoot = Path(__file__).resolve().parent.parent
+    tDataDir = tProjectRoot / "data"
+
+    ensure_directories(pBaseDataDir=tDataDir)
     tTimestamp = make_timestamp()
 
-    tRawCsvPath = Path(f"data/raw/{tTimestamp}_raw.csv")
-    tProcessedCsvPath = Path(f"data/processed/{tTimestamp}_processed.csv")
-    tPlotPath = Path(f"data/plots/{tTimestamp}_thrust.png")
+    tRawCsvPath = tDataDir / "raw" / f"{tTimestamp}_raw.csv"
+    tProcessedCsvPath = tDataDir / "processed" / f"{tTimestamp}_processed.csv"
+    tPlotPath = tDataDir / "plots" / f"{tTimestamp}_thrust.png"
 
     tRawDf = collect_serial_data(
         pPort=tPort,
         pBaudrate=tBaudrate,
         pRawCsvPath=tRawCsvPath,
+        pWarmupDurationS=tWarmupDurationS,
     )
 
     if tRawDf.empty:
