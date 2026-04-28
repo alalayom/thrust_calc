@@ -1,129 +1,243 @@
 # Thrust Calc
-HX711-based load cell thrust measurement system for rocket motor testing.
 
-This project consists of two main parts:
-- Arduino firmware for data acquisition
-- Python scripts for data logging, processing, and visualization
+Rocket motor test utilities for both static thrust stand measurements and LoRa-based telemetry logging.
+
+The project is split into two main subsystems:
+- Test stand: HX711 load cell data acquisition, thrust processing, and plotting
+- Telemetry: SX1278 LoRa receiver/transmitter firmware plus Python live logging and plotting
 
 ---
 
 ## Project Structure
+
 ```text
 thrust_calc/
-├─ arduino/
-│ ├─ calibration/
-│ │ └─ calibration.ino
-│ └─ thrust_logger/
-│ └─ thrust_logger.ino
-│
-├─ python/
-│ ├─ main.py
-│ ├─ serial_reader.py
-│ ├─ process_data.py
-│ ├─ plot_data.py
-│ └─ utils.py
-│
-├─ data/
-│ ├─ raw/
-│ ├─ processed/
-│ ├─ plots/
-│ └─ exports/
-│
-├─ docs/
-└─ README.md
+|-- arduino/
+|   |-- test_stand/
+|   |   |-- calibration/
+|   |   |   `-- calibration.ino
+|   |   `-- thrust_logger/
+|   |       `-- thrust_logger.ino
+|   `-- telemetry/
+|       |-- Receiver/
+|       |   `-- Receiver.ino
+|       `-- Transmitter/
+|           `-- Transmitter.ino
+|
+|-- python/
+|   |-- test_stand/
+|   |   |-- main.py
+|   |   |-- serial_reader.py
+|   |   |-- process_data.py
+|   |   |-- plot_data.py
+|   |   `-- utils.py
+|   `-- telemetry/
+|       `-- telemetry.py
+|
+|-- data/
+|   |-- raw/
+|   |-- processed/
+|   |-- plots/
+|   |-- telemetry/
+|   `-- exports/
+|
+|-- docs/
+|-- requirements.txt
+|-- LICENSE
+`-- README.md
 ```
 
 ## Requirements
+
 - Arduino IDE
 - Python 3.10+
-- HX711_ADC library
+- HX711_ADC Arduino library
+- LoRa Arduino library
+- Adafruit BMP280 Arduino library
+- Python dependencies from `requirements.txt`
 
-## Python dependencies
-Install using:
+Install Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 1. Calibration
+---
+
+## Test Stand
+
+The test stand subsystem measures load cell data with HX711, converts mass readings to thrust, and produces raw CSV, processed CSV, and thrust plots.
+
+### 1. Calibration
+
 Upload:
+
 ```text
-arduino/calibration/calibration.ino
+arduino/test_stand/calibration/calibration.ino
 ```
 
 Steps:
-1. Open Serial Monitor (57600 baud)
-2. Send t to tare the load cell (no load)
-3. Place a known weight
-4. Enter the weight value (e.g. 500.0)
-5. Press y to save calibration value to EEPROM
 
-## 2. Measurement Mode
+1. Open Serial Monitor at `57600` baud.
+2. Send `t` to tare the unloaded load cell.
+3. Place a known weight on the load cell.
+4. Enter the known weight value, for example `500.0`.
+5. Press `y` to save the calibration value to EEPROM.
+
+### 2. Measurement Mode
+
 Upload:
+
 ```text
-arduino/thrust_logger/thrust_logger.ino
+arduino/test_stand/thrust_logger/thrust_logger.ino
 ```
 
-This firmware reads calibration value from EEPROM and continuously outputs data in CSV format as time_ms,mass_g.
+This firmware reads the saved calibration value from EEPROM and continuously outputs CSV data:
+
+```text
+time_ms,mass_g
+```
 
 Example:
+
 ```text
-1234,512.3
-1245,514.1
+1234,512.300
+1245,514.100
 ```
 
-## Python Usage
+### 3. Python Test Stand Logger
+
 Before running Python:
 
-1. Close Arduino Serial Monitor
-2. Ensure correct COM port is set in main.py
-3. Make sure no other program is using the serial port
-4. Run Data Collection
+1. Close Arduino Serial Monitor.
+2. Check the COM port in `python/test_stand/main.py`.
+3. Make sure no other program is using the serial port.
+4. Run:
+
 ```bash
-python python/main.py
+python python/test_stand/main.py
 ```
 
-## Behavior
-- Script starts collecting data immediately
-- Runs continuously
-- Stop manually using:
-```bash
-Ctrl + C
-```
+The script collects serial data, processes it, saves output files, and prints a test summary.
 
-## Output Files
-After stopping the script, the following files are generated:
+### Test Stand Output Files
 
-Raw data
 ```text
 data/raw/<timestamp>_raw.csv
-```
-
-Processed data
-```text
 data/processed/<timestamp>_processed.csv
-```
-
-Plot
-```text
 data/plots/<timestamp>_thrust.png
 ```
 
-## Calculated Metrics
-- Max thrust (N)
-- Burn time (s) 
-- Total impulse (N·s)
+### Calculated Test Stand Metrics
+
+- Max thrust in N
+- Burn time in s
+- Total impulse in N.s
+
+---
+
+## Telemetry
+
+The telemetry subsystem uses a LoRa transmitter and receiver pair. The transmitter reads MPU6050 and BMP280 sensor data, sends packets over LoRa, and the receiver forwards received data to the computer over serial. The Python telemetry script logs CSV data and creates a live plot.
+
+### 1. Telemetry Transmitter
+
+Upload to the sensor/transmitter Arduino:
+
+```text
+arduino/telemetry/Transmitter/Transmitter.ino
+```
+
+Sensors and modules used:
+
+- MPU6050 for raw accelerometer and gyroscope values
+- BMP280 for temperature, pressure, and estimated altitude
+- SX1278 LoRa module at `433E6`
+- Button on `BUTTON_PIN` to start and stop telemetry streaming
+
+The transmitter sends:
+
+- `S` when telemetry starts
+- `T` when telemetry stops
+- `D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT` for telemetry data packets
+
+Telemetry packets are sent every `500 ms` while streaming is enabled.
+
+### 2. Telemetry Receiver
+
+Upload to the ground station/receiver Arduino:
+
+```text
+arduino/telemetry/Receiver/Receiver.ino
+```
+
+The receiver listens for LoRa packets, prints packet metadata to serial, and forwards telemetry values for the Python script.
+
+Serial settings:
+
+```text
+9600 baud
+```
+
+### 3. Python Telemetry Logger
+
+Before running Python:
+
+1. Close Arduino Serial Monitor.
+2. Check the COM port in `python/telemetry/telemetry.py`.
+3. Make sure the receiver Arduino is connected to the computer.
+4. Run:
+
+```bash
+python python/telemetry/telemetry.py
+```
+
+The telemetry script:
+
+- Waits for telemetry packets
+- Starts recording on `S` or the first valid data packet
+- Updates a live Matplotlib plot
+- Saves data on `T`, when the plot window is closed, or after a telemetry timeout
+
+### Telemetry Output Files
+
+```text
+data/telemetry/<timestamp>_telemetry.csv
+data/plots/<timestamp>_telemetry.png
+```
+
+Telemetry CSV columns:
+
+```text
+time_s,ax,ay,az,gx,gy,gz,temperature_c,pressure_hpa,altitude_m
+```
+
+---
 
 ## Workflow Summary
-1. Calibrate sensor (once)
-2. Upload thrust_logger firmware
-3. Run Python script
-4. Perform test
-5. Stop script manually
-6. Analyze results
+
+### Test Stand
+
+1. Calibrate the load cell once.
+2. Upload `thrust_logger.ino`.
+3. Run `python/test_stand/main.py`.
+4. Perform the static fire test.
+5. Stop the script manually.
+6. Review generated CSV files, plot, and metrics.
+
+### Telemetry
+
+1. Upload `Transmitter.ino` to the telemetry sensor node.
+2. Upload `Receiver.ino` to the ground station node.
+3. Run `python/telemetry/telemetry.py`.
+4. Start telemetry with the transmitter button.
+5. Stop telemetry with the same button or wait for timeout.
+6. Review generated telemetry CSV and plot.
 
 ## Notes
-- Ensure load cell is unloaded during startup if auto-tare is enabled
-- Data accuracy depends on mechanical stability
-- HX711 sampling rate is limited (~80 Hz max)
-- Noise may be present; filtering can be added later
+
+- Keep the load cell unloaded during startup if auto-tare is enabled.
+- Test stand accuracy depends on mechanical stability and calibration quality.
+- HX711 sampling rate is limited by the module and selected configuration.
+- Telemetry quality depends on LoRa antenna placement, range, and packet loss.
+- BMP280 altitude uses a reference sea-level pressure value, so altitude is an estimate.
