@@ -2,3 +2,4 @@ pyserial
 pandas
 matplotlib
 numpy
+vpython

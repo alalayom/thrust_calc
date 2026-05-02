@@ -7,7 +7,7 @@ import serial
 import matplotlib.pyplot as plt
 
 
-SERIAL_PORT = "COM5"
+SERIAL_PORT = "COM3"
 BAUD_RATE = 9600
 DATA_TIMEOUT_SECONDS = 3.0
 
