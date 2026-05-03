@@ -138,11 +138,11 @@ data/plots/<timestamp>_thrust.png
 
 ## Telemetry
 
-The telemetry subsystem uses a LoRa transmitter and receiver pair. The transmitter reads MPU6050 and BMP280 sensor data, sends packets over LoRa, and the receiver forwards received data to the computer over serial. The Python telemetry script logs CSV data and creates a live plot.
+The telemetry subsystem uses a LoRa transmitter/receiver pair with a single unified Python script that performs real-time simulation and data logging.
 
 ### 1. Telemetry Transmitter
 
-Upload to the sensor/transmitter Arduino:
+Upload to the sensor/transmitter Arduino or ESP32:
 
 ```text
 arduino/telemetry/Transmitter/Transmitter.ino
@@ -161,7 +161,11 @@ The transmitter sends:
 - `T` when telemetry stops
 - `D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT` for telemetry data packets
 
-Telemetry packets are sent every `500 ms` while streaming is enabled.
+```text
+D,-3244,64,14448,-55,165,-175,24.00,881.53,1159.32
+```
+
+Telemetry packets are sent every `100 ms` while streaming is enabled.
 
 ### 2. Telemetry Receiver
 
@@ -176,28 +180,29 @@ The receiver listens for LoRa packets, prints packet metadata to serial, and for
 Serial settings:
 
 ```text
-9600 baud
+115200 baud
 ```
 
-### 3. Python Telemetry Logger
+### 3. Python Telemetry Simulation & Logger
 
 Before running Python:
 
 1. Close Arduino Serial Monitor.
-2. Check the COM port in `python/telemetry/telemetry.py`.
+2. Check the COM port in `python/telemetry/telemetry_simulation.py`.
 3. Make sure the receiver Arduino is connected to the computer.
 4. Run:
 
 ```bash
-python python/telemetry/telemetry.py
+python python/telemetry/telemetry_simulation.py
 ```
 
 The telemetry script:
 
 - Waits for telemetry packets
 - Starts recording on `S` or the first valid data packet
-- Updates a live Matplotlib plot
-- Saves data on `T`, when the plot window is closed, or after a telemetry timeout
+- Performs gyro calibration automatically at startup
+- Runs real-time 3D rocket simulation
+- Records all telemetry data in memory
 
 ### Telemetry Output Files
 
@@ -229,7 +234,7 @@ time_s,ax,ay,az,gx,gy,gz,temperature_c,pressure_hpa,altitude_m
 
 1. Upload `Transmitter.ino` to the telemetry sensor node.
 2. Upload `Receiver.ino` to the ground station node.
-3. Run `python/telemetry/telemetry.py`.
+3. Run `python/telemetry/telemetry_simulation.py`.
 4. Start telemetry with the transmitter button.
 5. Stop telemetry with the same button or wait for timeout.
 6. Review generated telemetry CSV and plot.
