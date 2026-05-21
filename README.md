@@ -32,7 +32,7 @@ thrust_calc/
 |   |   |-- plot_data.py
 |   |   `-- utils.py
 |   `-- telemetry/
-|       `-- telemetry.py
+|       `-- telemetry_simulation.py
 |
 |-- data/
 |   |-- raw/
@@ -53,8 +53,8 @@ thrust_calc/
 - Python 3.10+
 - HX711_ADC Arduino library
 - LoRa Arduino library
-- Adafruit BMP280 Arduino library
-- Python dependencies from `requirements.txt`
+- Adafruit BMP3xx Arduino library
+- Python dependencies from `requirements.txt`, including VPython for the 3D telemetry view
 
 Install Python dependencies:
 
@@ -142,7 +142,7 @@ The telemetry subsystem uses a LoRa transmitter/receiver pair with a single unif
 
 ### 1. Telemetry Transmitter
 
-Upload to the sensor/transmitter Arduino or ESP32:
+Upload to the ESP32-S3 sensor/transmitter board:
 
 ```text
 arduino/telemetry/Transmitter/Transmitter.ino
@@ -150,8 +150,8 @@ arduino/telemetry/Transmitter/Transmitter.ino
 
 Sensors and modules used:
 
-- MPU6050 for raw accelerometer and gyroscope values
-- BMP280 for temperature, pressure, and estimated altitude
+- MPU6500 for raw accelerometer and gyroscope values
+- BMP388 for temperature, pressure, and estimated altitude
 - SX1278 LoRa module at `433E6`
 - Button on `BUTTON_PIN` to start and stop telemetry streaming
 
@@ -166,6 +166,7 @@ D,-3244,64,14448,-55,165,-175,24.00,881.53,1159.32
 ```
 
 Telemetry packets are sent every `100 ms` while streaming is enabled.
+After a reset, the transmitter skips the first few BMP388 readings so the initial unstable altitude value is not sent.
 
 ### 2. Telemetry Receiver
 
@@ -175,12 +176,12 @@ Upload to the ground station/receiver Arduino:
 arduino/telemetry/Receiver/Receiver.ino
 ```
 
-The receiver listens for LoRa packets, prints packet metadata to serial, and forwards telemetry values for the Python script.
+The receiver listens for LoRa packets, prints packet metadata to serial, and forwards raw packets for the Python script.
 
 Serial settings:
 
 ```text
-115200 baud
+Use the same baud rate configured in both Receiver.ino and python/telemetry/telemetry_simulation.py.
 ```
 
 ### 3. Python Telemetry Simulation & Logger
@@ -202,7 +203,7 @@ The telemetry script:
 - Starts recording on `S` or the first valid data packet
 - Performs gyro calibration automatically at startup
 - Runs real-time 3D rocket simulation
-- Records all telemetry data in memory
+- Saves telemetry CSV and plot output after `T` or telemetry timeout
 
 ### Telemetry Output Files
 
@@ -245,4 +246,4 @@ time_s,ax,ay,az,gx,gy,gz,temperature_c,pressure_hpa,altitude_m
 - Test stand accuracy depends on mechanical stability and calibration quality.
 - HX711 sampling rate is limited by the module and selected configuration.
 - Telemetry quality depends on LoRa antenna placement, range, and packet loss.
-- BMP280 altitude uses a reference sea-level pressure value, so altitude is an estimate.
+- BMP388 altitude uses a reference sea-level pressure value, so altitude is an estimate.
