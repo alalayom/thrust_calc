@@ -1,10 +1,18 @@
 # Thrust Calc
 
-Rocket motor test utilities for both static thrust stand measurements and LoRa-based telemetry logging.
+Rocket motor ground software and Arduino firmware for static thrust testing, LoRa telemetry, live plotting, rocket attitude visualization, and ignition control.
 
-The project is split into two main subsystems:
-- Test stand: HX711 load cell data acquisition, thrust processing, and plotting
-- Telemetry: SX1278 LoRa receiver/transmitter firmware plus Python live logging and plotting
+The current Python side is centered around a single control panel:
+
+```bash
+python python/rocket_panel/main.py
+```
+
+The panel opens a full-screen desktop window with:
+- a top port selection bar
+- a left live graph area
+- a right live data and rocket simulation area
+- a bottom control panel for `staticTest`, `Telemetry`, `Start`, `Stop`, `Save`, and `fuse`
 
 ---
 
@@ -25,14 +33,14 @@ thrust_calc/
 |           `-- Transmitter.ino
 |
 |-- python/
-|   |-- test_stand/
-|   |   |-- main.py
-|   |   |-- serial_reader.py
-|   |   |-- process_data.py
-|   |   |-- plot_data.py
-|   |   `-- utils.py
-|   `-- telemetry/
-|       `-- telemetry_simulation.py
+|   `-- rocket_panel/
+|       |-- main.py
+|       |-- app.py
+|       |-- config/
+|       |-- modes/
+|       |-- parsers/
+|       |-- plotting/
+|       `-- serial_io/
 |
 |-- data/
 |   |-- raw/
@@ -49,12 +57,19 @@ thrust_calc/
 
 ## Requirements
 
+### Arduino
+
 - Arduino IDE
-- Python 3.10+
+- ESP32 board support for the ESP32-S3 telemetry transmitter
 - HX711_ADC Arduino library
 - LoRa Arduino library
-- Adafruit BMP3xx Arduino library
-- Python dependencies from `requirements.txt`, including VPython for the 3D telemetry view
+- Adafruit BMP3XX Arduino library
+
+### Python
+
+- Python 3.10+
+- Python with Tk/Tkinter support
+- Dependencies from `requirements.txt`
 
 Install Python dependencies:
 
@@ -64,9 +79,77 @@ pip install -r requirements.txt
 
 ---
 
-## Test Stand
+## Control Panel
 
-The test stand subsystem measures load cell data with HX711, converts mass readings to thrust, and produces raw CSV, processed CSV, and thrust plots.
+Run:
+
+```bash
+python python/rocket_panel/main.py
+```
+
+### Top Bar
+
+- `Data Port`: incoming serial data port for either static test or telemetry
+- `Data Baud`: baud rate for the selected data port
+- `Ignition Port`: outgoing serial port for ignition/fuse commands
+- `Ignition Baud`: baud rate for the ignition controller
+- `Refresh`: refreshes available COM ports
+
+The data port and ignition port should be different devices.
+
+### Main View
+
+- Left side: live graph
+- Right side: live values and rocket simulation
+- Bottom panel: mode selection and control buttons
+
+### Modes
+
+`staticTest`
+
+- Reads thrust stand serial data in this format:
+
+```text
+time_ms,mass_g
+```
+
+- Applies startup warmup and baseline filtering to avoid HX711 startup spikes.
+- Converts corrected mass to thrust in Newtons.
+- Shows live thrust graph and metrics.
+
+`Telemetry`
+
+- Reads LoRa receiver serial output.
+- Accepts receiver lines such as:
+
+```text
+Raw packet: D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+```
+
+- Also accepts direct telemetry packets:
+
+```text
+D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+```
+
+- Updates live telemetry graphs.
+- Runs the built-in Matplotlib 3D rocket attitude simulation.
+- Performs gyro startup calibration before showing live attitude changes.
+
+### Fuse
+
+The `fuse` button sends commands over the selected ignition port:
+
+```text
+fuse ON  -> FIRE
+fuse OFF -> SAFE
+```
+
+The ignition Arduino/controller must be programmed to receive those serial commands and handle the actual ignition circuit safely.
+
+---
+
+## Static Test Firmware
 
 ### 1. Calibration
 
@@ -84,7 +167,7 @@ Steps:
 4. Enter the known weight value, for example `500.0`.
 5. Press `y` to save the calibration value to EEPROM.
 
-### 2. Measurement Mode
+### 2. Measurement
 
 Upload:
 
@@ -92,35 +175,20 @@ Upload:
 arduino/test_stand/thrust_logger/thrust_logger.ino
 ```
 
-This firmware reads the saved calibration value from EEPROM and continuously outputs CSV data:
+The firmware reads the saved calibration value from EEPROM and continuously outputs:
 
 ```text
 time_ms,mass_g
 ```
 
-Example:
+Default panel settings:
 
 ```text
-1234,512.300
-1245,514.100
+Mode      : staticTest
+Data Baud : 57600
 ```
 
-### 3. Python Test Stand Logger
-
-Before running Python:
-
-1. Close Arduino Serial Monitor.
-2. Check the COM port in `python/test_stand/main.py`.
-3. Make sure no other program is using the serial port.
-4. Run:
-
-```bash
-python python/test_stand/main.py
-```
-
-The script collects serial data, processes it, saves output files, and prints a test summary.
-
-### Test Stand Output Files
+Panel outputs:
 
 ```text
 data/raw/<timestamp>_raw.csv
@@ -128,7 +196,7 @@ data/processed/<timestamp>_processed.csv
 data/plots/<timestamp>_thrust.png
 ```
 
-### Calculated Test Stand Metrics
+Calculated metrics:
 
 - Max thrust in N
 - Burn time in s
@@ -136,11 +204,9 @@ data/plots/<timestamp>_thrust.png
 
 ---
 
-## Telemetry
+## Telemetry Firmware
 
-The telemetry subsystem uses a LoRa transmitter/receiver pair with a single unified Python script that performs real-time simulation and data logging.
-
-### 1. Telemetry Transmitter
+### 1. Transmitter
 
 Upload to the ESP32-S3 sensor/transmitter board:
 
@@ -148,7 +214,7 @@ Upload to the ESP32-S3 sensor/transmitter board:
 arduino/telemetry/Transmitter/Transmitter.ino
 ```
 
-Sensors and modules used:
+Hardware used:
 
 - MPU6500 for raw accelerometer and gyroscope values
 - BMP388 for temperature, pressure, and estimated altitude
@@ -157,18 +223,21 @@ Sensors and modules used:
 
 The transmitter sends:
 
-- `S` when telemetry starts
-- `T` when telemetry stops
-- `D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT` for telemetry data packets
-
 ```text
-D,-3244,64,14448,-55,165,-175,24.00,881.53,1159.32
+S
+T
+D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
 ```
 
-Telemetry packets are sent every `100 ms` while streaming is enabled.
-After a reset, the transmitter skips the first few BMP388 readings so the initial unstable altitude value is not sent.
+Example packet:
 
-### 2. Telemetry Receiver
+```text
+D,-690,68,7766,-151,133,-10,27.59,891.73,1064.71
+```
+
+Telemetry packets are sent every `100 ms` while streaming is enabled. After reset, the transmitter skips the first few BMP388 readings so the first unstable altitude value is not sent.
+
+### 2. Receiver
 
 Upload to the ground station/receiver Arduino:
 
@@ -176,36 +245,22 @@ Upload to the ground station/receiver Arduino:
 arduino/telemetry/Receiver/Receiver.ino
 ```
 
-The receiver listens for LoRa packets, prints packet metadata to serial, and forwards raw packets for the Python script.
+The receiver listens for LoRa packets, prints packet metadata, and forwards raw packets to the control panel.
 
-Serial settings:
+Current receiver serial baud:
 
 ```text
-Use the same baud rate configured in both Receiver.ino and python/telemetry/telemetry_simulation.py.
+9600
 ```
 
-### 3. Python Telemetry Simulation & Logger
+Default panel settings:
 
-Before running Python:
-
-1. Close Arduino Serial Monitor.
-2. Check the COM port in `python/telemetry/telemetry_simulation.py`.
-3. Make sure the receiver Arduino is connected to the computer.
-4. Run:
-
-```bash
-python python/telemetry/telemetry_simulation.py
+```text
+Mode      : Telemetry
+Data Baud : 9600
 ```
 
-The telemetry script:
-
-- Waits for telemetry packets
-- Starts recording on `S` or the first valid data packet
-- Performs gyro calibration automatically at startup
-- Runs real-time 3D rocket simulation
-- Saves telemetry CSV and plot output after `T` or telemetry timeout
-
-### Telemetry Output Files
+Panel outputs:
 
 ```text
 data/telemetry/<timestamp>_telemetry.csv
@@ -222,28 +277,37 @@ time_s,ax,ay,az,gx,gy,gz,temperature_c,pressure_hpa,altitude_m
 
 ## Workflow Summary
 
-### Test Stand
+### Static Test
 
 1. Calibrate the load cell once.
 2. Upload `thrust_logger.ino`.
-3. Run `python/test_stand/main.py`.
-4. Perform the static fire test.
-5. Stop the script manually.
-6. Review generated CSV files, plot, and metrics.
+3. Run `python/rocket_panel/main.py`.
+4. Select `staticTest`.
+5. Select the thrust stand data port and `57600` baud.
+6. Press `Start`.
+7. Press `Stop` or `Save` after the test.
 
 ### Telemetry
 
 1. Upload `Transmitter.ino` to the telemetry sensor node.
 2. Upload `Receiver.ino` to the ground station node.
-3. Run `python/telemetry/telemetry_simulation.py`.
-4. Start telemetry with the transmitter button.
-5. Stop telemetry with the same button or wait for timeout.
-6. Review generated telemetry CSV and plot.
+3. Run `python/rocket_panel/main.py`.
+4. Select `Telemetry`.
+5. Select the receiver data port and `9600` baud.
+6. Press `Start`.
+7. Start/stop telemetry with the transmitter button.
+
+### Ignition
+
+1. Connect the ignition controller as a separate serial device.
+2. Select it as `Ignition Port`.
+3. Keep the ignition controller firmware matched to the panel commands: `FIRE` and `SAFE`.
+4. Use `fuse OFF/ON` only when the physical safety setup is ready.
 
 ## Notes
 
-- Keep the load cell unloaded during startup if auto-tare is enabled.
+- Keep Arduino Serial Monitor and Serial Plotter closed before opening the same COM port in the panel.
+- Keep the load cell unloaded during static test startup so baseline filtering can settle correctly.
 - Test stand accuracy depends on mechanical stability and calibration quality.
-- HX711 sampling rate is limited by the module and selected configuration.
 - Telemetry quality depends on LoRa antenna placement, range, and packet loss.
 - BMP388 altitude uses a reference sea-level pressure value, so altitude is an estimate.

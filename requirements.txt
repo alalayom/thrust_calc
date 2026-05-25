@@ -1,5 +1,4 @@
 pyserial
-pandas
 matplotlib
-numpy
+pandas
 vpython
