@@ -57,13 +57,14 @@ thrust_calc/
 
 ## Requirements
 
-### Arduino
+### ESP32
 
 - Arduino IDE
 - ESP32 board support for the ESP32-S3 telemetry transmitter
 - HX711_ADC Arduino library
 - LoRa Arduino library
 - Adafruit BMP3XX Arduino library
+- TinyGPSPlus Arduino library
 
 ### Python
 
@@ -123,13 +124,13 @@ time_ms,mass_g
 - Accepts receiver lines such as:
 
 ```text
-Raw packet: D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+Raw packet: D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT,LAT,LON,GSAT,GALT
 ```
 
 - Also accepts direct telemetry packets:
 
 ```text
-D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT,LAT,LON,GSAT,GALT
 ```
 
 - Updates live telemetry graphs.
@@ -220,19 +221,20 @@ Hardware used:
 - BMP388 for temperature, pressure, and estimated altitude
 - SX1278 LoRa module at `433E6`
 - Button on `BUTTON_PIN` to start and stop telemetry streaming
+- NE0-M8N GPS for latitude, altitude and altitude values
 
 The transmitter sends:
 
 ```text
 S
 T
-D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT,LAT,LON,GSAT,GALT
 ```
 
 Example packet:
 
 ```text
-D,-690,68,7766,-151,133,-10,27.59,891.73,1064.71
+D,-690,68,7766,-151,133,-10,27.59,891.73,1064.71,40.123456,41.123456,10,1080.60
 ```
 
 Telemetry packets are sent every `100 ms` while streaming is enabled. After reset, the transmitter skips the first few BMP388 readings so the first unstable altitude value is not sent.
@@ -257,7 +259,7 @@ Default panel settings:
 
 ```text
 Mode      : Telemetry
-Data Baud : 9600
+Data Baud : 115200
 ```
 
 Panel outputs:
@@ -311,3 +313,4 @@ time_s,ax,ay,az,gx,gy,gz,temperature_c,pressure_hpa,altitude_m
 - Test stand accuracy depends on mechanical stability and calibration quality.
 - Telemetry quality depends on LoRa antenna placement, range, and packet loss.
 - BMP388 altitude uses a reference sea-level pressure value, so altitude is an estimate.
+- Wait for the GPS to acquire a satellite fix.
