@@ -9,7 +9,7 @@
 
 /*
   EXPECTED DATA PACKET FORMAT:
-  D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+  D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT,LAT,LON,GSAT,GALT
 
   D   = Data packet marker
   AX  = Accelerometer X raw value
@@ -18,9 +18,13 @@
   GX  = Gyroscope X raw value
   GY  = Gyroscope Y raw value
   GZ  = Gyroscope Z raw value
-  BT  = BMP280 temperature in Celsius
+  BT  = Temperature in Celsius
   P   = Pressure in hPa
   ALT = Estimated altitude in meters
+  LAT  = GPS latitude
+  LON  = GPS longitude
+  GSAT = GPS satellite count
+  GALT = GPS altitude in meters
 */
 
 String getCsvValue(String pData, int pIndex) {
@@ -66,6 +70,10 @@ void printTelemetry(String pMessage) {
   String tBmpTemp = getCsvValue(pMessage, 7);
   String tPressure = getCsvValue(pMessage, 8);
   String tAltitude = getCsvValue(pMessage, 9);
+  String tLatitude = getCsvValue(pMessage, 10);
+  String tLongitude = getCsvValue(pMessage, 11);
+  String tGpsSatellites = getCsvValue(pMessage, 12);
+  String tGpsAltitude = getCsvValue(pMessage, 13);
 
   Serial.println("Telemetry data received:");
   Serial.print("  Accelerometer X: ");
@@ -88,10 +96,19 @@ void printTelemetry(String pMessage) {
   Serial.println(tPressure);
   Serial.print("  Estimated Altitude m: ");
   Serial.println(tAltitude);
+
+  Serial.print("  GPS Latitude: ");
+  Serial.println(tLatitude);
+  Serial.print("  GPS Longitude: ");
+  Serial.println(tLongitude);
+  Serial.print("  GPS Satellites: ");
+  Serial.println(tGpsSatellites);
+  Serial.print("  GPS Altitude m: ");
+  Serial.println(tGpsAltitude);
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   while (!Serial);
 
   Serial.println("Starting receiver..");

@@ -1,5 +1,6 @@
 #include <LoRa.h>
 #include <Adafruit_BMP3XX.h>
+#include <TinyGPSPlus.h>
 
 #define LORA_SCK   12
 #define LORA_MISO  13
@@ -13,16 +14,23 @@
 #define I2C_SDA 4
 #define I2C_SCL 5
 
+#define GPS_RX 18
+#define GPS_TX 17
+#define GPS_BAUD 9600
+
 #define MPU_ADDR 0x68
 #define BMP_ADDR 0x76
 
 Adafruit_BMP3XX bmp;
+TinyGPSPlus gps;
+HardwareSerial GPS_SERIAL(1);
 
 bool gStreamState = false;
 bool gLastButtonReading = HIGH;
 bool gButtonStableState = HIGH;
 bool gBmpOk = false;
 bool gMpuOk = false;
+bool gGPSOk = false;
 
 unsigned long gLastDebounceTime = 0;
 const unsigned long gDebounceDelay = 50;
@@ -37,7 +45,7 @@ int16_t gGx, gGy, gGz;
 
 /*
   DATA PACKET FORMAT:
-  D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT
+  D,AX,AY,AZ,GX,GY,GZ,BT,P,ALT,LAT,LONG,GSAT,GALT
 */
 
 void writeI2cRegister(byte pAddress, byte pRegister, byte pValue) {
@@ -58,6 +66,12 @@ byte readI2cRegister(byte pAddress, byte pRegister) {
   }
 
   return 0;
+}
+
+void readGpsData() {
+  while (GPS_SERIAL.available()) {
+    gps.encode(GPS_SERIAL.read());
+  }
 }
 
 void sendLoRaMessage(String pMessage) {
@@ -161,6 +175,10 @@ void setup() {
 
   Wire.begin(I2C_SDA, I2C_SCL);
 
+  GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
+  gGPSOk = true;
+  Serial.println("GPS UART initialized successfully.");
+
   if (initMPU6500()) {
     gMpuOk = true;
     Serial.println("MPU6500 initialized successfully.");
@@ -199,6 +217,8 @@ void setup() {
 }
 
 void loop() {
+  readGpsData();
+
   bool tReading = digitalRead(BUTTON_PIN);
 
   if (tReading != gLastButtonReading) {
@@ -268,6 +288,28 @@ void loop() {
       }
     }
 
+    double tLatitude = -999.0;
+    double tLongitude = -999.0;
+    int tGpsSatellites = -1;
+    double tGpsAltitude = -999.0;
+
+    if (gGPSOk == true) {
+      readGpsData();
+
+      if (gps.location.isValid()) {
+        tLatitude = gps.location.lat();
+        tLongitude = gps.location.lng();
+      }
+
+      if (gps.satellites.isValid()) {
+        tGpsSatellites = gps.satellites.value();
+      }
+
+      if (gps.altitude.isValid()) {
+        tGpsAltitude = gps.altitude.meters();
+      }
+    }
+
     String tMessage = "D,";
     tMessage += String(gAx) + ",";
     tMessage += String(gAy) + ",";
@@ -277,7 +319,11 @@ void loop() {
     tMessage += String(gGz) + ",";
     tMessage += String(tBmpTemp, 2) + ",";
     tMessage += String(tPressure, 2) + ",";
-    tMessage += String(tAltitude, 2);
+    tMessage += String(tAltitude, 2) + ",";
+    tMessage += String(tLatitude, 6) + ",";
+    tMessage += String(tLongitude, 6) + ",";
+    tMessage += String(tGpsSatellites) + ",";
+    tMessage += String(tGpsAltitude, 2);
 
     sendLoRaMessage(tMessage);
 
