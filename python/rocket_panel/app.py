@@ -1,8 +1,11 @@
 import csv
+import io
 import math
 import queue
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,7 @@ from typing import Optional
 import matplotlib
 
 matplotlib.use("TkAgg")
+import matplotlib.image as mpimg
 
 import tkinter as tk
 from tkinter import ttk
@@ -34,6 +38,15 @@ MAX_VISIBLE_POINTS = 1200
 STATIC_WARMUP_SECONDS = 3.0
 STATIC_BASELINE_SAMPLE_COUNT = 30
 STATIC_BASELINE_MAX_RANGE_G = 50.0
+MIN_MAP_VIEW_SPAN_DEG = 0.002
+MAP_TILE_THROTTLE_SECONDS = 0.35
+MAX_MAP_TILES = 24
+MIN_OSM_ZOOM = 1
+MAX_OSM_ZOOM = 19
+DEFAULT_OSM_ZOOM = 13
+OSM_TILE_SIZE_PX = 256
+MAP_CENTER_UPDATE_THRESHOLD_M = 50.0
+EARTH_RADIUS_M = 6371000.0
 
 MODE_STATIC = "staticTest"
 MODE_TELEMETRY = "Telemetry"
@@ -62,6 +75,31 @@ def parse_float_parts(parts: list[str]) -> Optional[list[float]]:
         return None
 
 
+def is_gps_sentinel(value: Optional[float]) -> bool:
+    if value is None:
+        return True
+    return abs(value - 999.0) < 0.0001 or abs(value + 999.0) < 0.0001
+
+
+def is_gps_connected(latitude: Optional[float], longitude: Optional[float]) -> bool:
+    if is_gps_sentinel(latitude) or is_gps_sentinel(longitude):
+        return False
+    return -90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0
+
+
+def gps_distance_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    lat_a_rad = math.radians(lat_a)
+    lat_b_rad = math.radians(lat_b)
+    delta_lat = math.radians(lat_b - lat_a)
+    delta_lon = math.radians(lon_b - lon_a)
+    haversine = (
+        math.sin(delta_lat / 2.0) ** 2
+        + math.cos(lat_a_rad) * math.cos(lat_b_rad) * math.sin(delta_lon / 2.0) ** 2
+    )
+    haversine = max(0.0, min(1.0, haversine))
+    return EARTH_RADIUS_M * 2.0 * math.atan2(math.sqrt(haversine), math.sqrt(1.0 - haversine))
+
+
 def extract_telemetry_packet(line: str) -> Optional[str]:
     line = line.strip()
 
@@ -75,7 +113,7 @@ def extract_telemetry_packet(line: str) -> Optional[str]:
         return line
 
     parts = line.split(",")
-    if len(parts) == 9 and parse_float_parts(parts) is not None:
+    if len(parts) in (9, 13) and parse_float_parts(parts) is not None:
         return "D," + line
 
     return None
@@ -236,14 +274,40 @@ class SerialReader(threading.Thread):
             return
 
         parts = packet.split(",")
-        if len(parts) != 10 or parts[0] != "D":
+        if len(parts) not in (10, 14) or parts[0] != "D":
             return
 
         values = parse_float_parts(parts[1:])
         if values is None:
             return
 
-        ax, ay, az, gx, gy, gz, temp_c, pressure_hpa, altitude_m = values
+        ax, ay, az, gx, gy, gz, temp_c, pressure_hpa, altitude_m = values[:9]
+
+        latitude = None
+        longitude = None
+        gps_satellites = None
+        gps_altitude_m = None
+
+        if len(values) == 13:
+            latitude = values[9]
+            longitude = values[10]
+            gps_satellites = int(values[11])
+            gps_altitude_m = values[12]
+
+            if is_gps_sentinel(latitude):
+                latitude = None
+
+            if is_gps_sentinel(longitude):
+                longitude = None
+
+            if gps_satellites < 0 or gps_satellites >= 999:
+                gps_satellites = None
+
+            if is_gps_sentinel(gps_altitude_m):
+                gps_altitude_m = None
+
+        gps_connected = is_gps_connected(latitude, longitude)
+
         self.output_queue.put(
             SerialEvent(
                 "telemetry",
@@ -258,6 +322,11 @@ class SerialReader(threading.Thread):
                     "temperature_c": temp_c,
                     "pressure_hpa": pressure_hpa,
                     "altitude_m": altitude_m,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "gps_satellites": gps_satellites,
+                    "gps_altitude_m": gps_altitude_m,
+                    "gps_connected": gps_connected,
                 },
             )
         )
@@ -393,13 +462,32 @@ class RocketPanelApp:
         self.last_plot_time = 0.0
         self.rocket_estimator = RocketEstimator()
         self.orientation = (0.0, 0.0, 0.0)
+        self.gps_path: list[tuple[float, float]] = []
+        self.map_center_lat = 0.0
+        self.map_center_lon = 0.0
+        self.map_initialized_from_gps = False
+        self.map_tile_cache = {}
+        self.map_tiles_enabled = True
+        self.map_image_artists = []
+        self.map_tile_request_queue: queue.Queue = queue.Queue()
+        self.map_tile_response_queue: queue.Queue = queue.Queue()
+        self.map_pending_tile_key = None
+        self.map_current_tile_key = None
+        self.map_last_tile_request_time = 0.0
+        self.map_zoom_level = DEFAULT_OSM_ZOOM
+        self.map_info_var = tk.StringVar(value="center: 0.00000, 0.00000 | zoom: 13")
+        self.map_worker = threading.Thread(target=self.map_tile_worker, daemon=True)
+        self.map_worker.start()
 
         self.live_values: dict[str, tk.StringVar] = {}
+        self.gps_status_var = tk.StringVar(value="satellite not connected")
+        self.gps_status_label = None
 
         self.build_styles()
         self.build_layout()
         self.refresh_ports()
         self.configure_mode_graph()
+        self.configure_mode_visibility()
 
         self.root.after(40, self.process_events)
 
@@ -445,23 +533,43 @@ class RocketPanelApp:
         self.side_frame = ttk.Frame(content, style="Panel.TFrame", padding=8)
         self.side_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self.side_frame.columnconfigure(0, weight=1)
-        self.side_frame.rowconfigure(1, weight=1)
-        self.side_frame.rowconfigure(3, weight=1)
+        self.side_frame.rowconfigure(1, weight=3)
+        self.side_frame.rowconfigure(3, weight=2)
 
-        ttk.Label(self.side_frame, text="Live Data", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        self.data_grid = ttk.Frame(self.side_frame, style="Panel.TFrame")
-        self.data_grid.grid(row=1, column=0, sticky="nsew", pady=(8, 10))
+        self.map_header_frame = ttk.Frame(self.side_frame, style="Panel.TFrame")
+        self.map_header_frame.grid(row=0, column=0, sticky="ew")
+        self.map_header_frame.columnconfigure(1, weight=1)
+        self.map_title_label = ttk.Label(self.map_header_frame, text="GPS Map", style="Title.TLabel")
+        self.map_title_label.grid(row=0, column=0, sticky="w")
+        self.map_info_label = tk.Label(
+            self.map_header_frame,
+            textvariable=self.map_info_var,
+            bg="#222731",
+            fg="#c8d4e3",
+            font=("Segoe UI", 8),
+            padx=8,
+            pady=3,
+        )
+        self.map_info_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.map_figure = Figure(figsize=(5.0, 4.0), dpi=120, facecolor="#181b22")
+        self.map_canvas = FigureCanvasTkAgg(self.map_figure, master=self.side_frame)
+        self.map_widget = self.map_canvas.get_tk_widget()
+        self.map_widget.grid(row=1, column=0, sticky="nsew", pady=(8, 10))
+        self.build_map_plot()
 
-        ttk.Label(self.side_frame, text="Rocket Simulation", style="Title.TLabel").grid(row=2, column=0, sticky="w")
-        self.sim_figure = Figure(figsize=(4.5, 3.5), dpi=100, facecolor="#181b22")
+        self.sim_title_label = ttk.Label(self.side_frame, text="Rocket Simulation", style="Title.TLabel")
+        self.sim_title_label.grid(row=2, column=0, sticky="w")
+        self.sim_figure = Figure(figsize=(5.0, 3.0), dpi=100, facecolor="#181b22")
         self.sim_canvas = FigureCanvasTkAgg(self.sim_figure, master=self.side_frame)
-        self.sim_canvas.get_tk_widget().grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        self.sim_widget = self.sim_canvas.get_tk_widget()
+        self.sim_widget.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
         self.build_simulation_plot()
 
+        self.build_live_data_bar()
         self.build_bottom_panel()
 
         status_bar = ttk.Frame(self.root, style="TFrame", padding=(10, 0, 10, 8))
-        status_bar.grid(row=3, column=0, sticky="ew")
+        status_bar.grid(row=4, column=0, sticky="ew")
         ttk.Label(status_bar, textvariable=self.status_var, style="Status.TLabel").pack(side="left")
 
     def build_top_bar(self) -> None:
@@ -498,9 +606,18 @@ class RocketPanelApp:
 
         ttk.Button(top, text="Refresh", command=self.refresh_ports).pack(side="left")
 
+    def build_live_data_bar(self) -> None:
+        self.live_data_frame = ttk.Frame(self.root, style="Panel.TFrame", padding=(10, 6, 10, 6))
+        self.live_data_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.live_data_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(self.live_data_frame, text="Live Data", style="Title.TLabel").grid(row=0, column=0, sticky="nw", padx=(0, 12))
+        self.data_grid = ttk.Frame(self.live_data_frame, style="Panel.TFrame")
+        self.data_grid.grid(row=0, column=1, sticky="ew")
+
     def build_bottom_panel(self) -> None:
         bottom = ttk.Frame(self.root, style="Panel.TFrame", padding=(12, 10, 12, 10))
-        bottom.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
+        bottom.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         ttk.Label(bottom, text="selectMode", style="Panel.TLabel").pack(side="left", padx=(0, 10))
         ttk.Radiobutton(
@@ -530,6 +647,32 @@ class RocketPanelApp:
             text="Fuse ON sends FIRE, OFF sends SAFE over ignition port.",
             style="Panel.TLabel",
         ).pack(side="left")
+
+    def build_map_plot(self) -> None:
+        self.map_figure.clear()
+        self.map_ax = self.map_figure.add_subplot(111)
+        self.map_ax.set_facecolor("#181b22")
+        self.map_ax.set_axis_off()
+        self.map_ax.set_aspect("auto")
+        self.gps_route_line, = self.map_ax.plot([], [], color="#22c55e", linewidth=2.8, marker="o", markersize=3, zorder=5)
+        self.gps_current_point, = self.map_ax.plot([], [], color="#facc15", marker="o", markersize=8, zorder=6)
+        self.map_ax.set_xlim(-0.01, 0.01)
+        self.map_ax.set_ylim(-0.01, 0.01)
+        self.map_text = self.map_ax.text(
+            0.5,
+            0.5,
+            "0.000000, 0.000000\nWaiting for GPS fix",
+            transform=self.map_ax.transAxes,
+            ha="center",
+            va="center",
+            color="#ef4444",
+            fontsize=11,
+            weight="bold",
+        )
+        self.map_figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        self.map_canvas.mpl_connect("scroll_event", self.on_map_scroll)
+        self.update_map_info()
+        self.map_canvas.draw_idle()
 
     def build_simulation_plot(self) -> None:
         self.sim_figure.clear()
@@ -564,7 +707,7 @@ class RocketPanelApp:
                 ("Accel Raw", ("ax", "ay", "az")),
                 ("Gyro Raw", ("gx", "gy", "gz")),
                 ("Temp C", ("temperature_c",)),
-                ("Pressure / Altitude", ("pressure_hpa", "altitude_m")),
+                ("Pressure / Altitude", ("pressure_hpa", "altitude_m", "gps_altitude_m")),
             ]
             for index, (ylabel, keys) in enumerate(labels, start=1):
                 axis = self.figure.add_subplot(4, 1, index)
@@ -591,6 +734,11 @@ class RocketPanelApp:
                     "temperature_c",
                     "pressure_hpa",
                     "altitude_m",
+                    "gps_altitude_m",
+                    "latitude",
+                    "longitude",
+                    "connected_satellites",
+                    "gps_status",
                     "roll_deg",
                     "pitch_deg",
                     "yaw_deg",
@@ -613,19 +761,81 @@ class RocketPanelApp:
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def configure_mode_visibility(self) -> None:
+        if self.mode_var.get() == MODE_TELEMETRY:
+            self.map_header_frame.grid(row=0, column=0, sticky="ew")
+            self.map_widget.grid(row=1, column=0, sticky="nsew", pady=(8, 10))
+            self.sim_title_label.grid(row=2, column=0, sticky="w")
+            self.sim_widget.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+            self.side_frame.rowconfigure(1, weight=3)
+            self.side_frame.rowconfigure(3, weight=2)
+        else:
+            self.map_header_frame.grid_remove()
+            self.map_widget.grid_remove()
+            self.sim_title_label.grid(row=0, column=0, sticky="w")
+            self.sim_widget.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+            self.side_frame.rowconfigure(1, weight=1)
+            self.side_frame.rowconfigure(3, weight=0)
+
     def setup_value_labels(self, keys: list[str]) -> None:
         for child in self.data_grid.winfo_children():
             child.destroy()
 
         self.live_values = {}
-        self.data_grid.columnconfigure(0, weight=0)
-        self.data_grid.columnconfigure(1, weight=1)
+        self.gps_status_label = None
 
-        for row, key in enumerate(keys):
-            ttk.Label(self.data_grid, text=key, style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=2, padx=(0, 10))
-            value_var = tk.StringVar(value="-")
-            self.live_values[key] = value_var
-            ttk.Label(self.data_grid, textvariable=value_var, style="Panel.TLabel").grid(row=row, column=1, sticky="e", pady=2)
+        for column, key in enumerate(keys):
+            self.data_grid.columnconfigure(column, weight=1)
+            cell = ttk.Frame(self.data_grid, style="Panel.TFrame", padding=(4, 0, 4, 0))
+            cell.grid(row=0, column=column, sticky="ew", padx=(0, 4))
+
+            ttk.Label(
+                cell,
+                text=self.format_live_key(key),
+                style="Panel.TLabel",
+                font=("Segoe UI", 8, "bold"),
+            ).grid(row=0, column=0, sticky="w")
+
+            if key == "gps_status":
+                self.gps_status_var.set("satellite not connected")
+                self.gps_status_label = tk.Label(
+                    cell,
+                    textvariable=self.gps_status_var,
+                    bg="#181b22",
+                    fg="#ef4444",
+                    font=("Segoe UI", 8, "bold"),
+                )
+                self.gps_status_label.grid(row=1, column=0, sticky="w")
+            else:
+                value_var = tk.StringVar(value="-")
+                self.live_values[key] = value_var
+                ttk.Label(
+                    cell,
+                    textvariable=value_var,
+                    style="Panel.TLabel",
+                    font=("Segoe UI", 9),
+                ).grid(row=1, column=0, sticky="w")
+
+    @staticmethod
+    def format_live_key(key: str) -> str:
+        labels = {
+            "samples": "samples",
+            "time_s": "time",
+            "temperature_c": "temp",
+            "pressure_hpa": "pressure",
+            "altitude_m": "bmp alt",
+            "gps_altitude_m": "gps alt",
+            "connected_satellites": "sat",
+            "gps_status": "gps",
+            "roll_deg": "roll",
+            "pitch_deg": "pitch",
+            "yaw_deg": "yaw",
+            "simulation": "sim",
+            "max_thrust_n": "max thrust",
+            "burn_time_s": "burn",
+            "total_impulse_ns": "impulse",
+        }
+        return labels.get(key, key)
 
     def refresh_ports(self) -> None:
         ports = available_ports()
@@ -651,6 +861,7 @@ class RocketPanelApp:
 
         self.reset_session()
         self.configure_mode_graph()
+        self.configure_mode_visibility()
         self.status_var.set(f"Mode selected: {self.mode_var.get()}")
 
     def reset_session(self) -> None:
@@ -658,9 +869,24 @@ class RocketPanelApp:
         self.static_time_offset = None
         self.rocket_estimator.reset()
         self.orientation = (0.0, 0.0, 0.0)
+        self.gps_path = []
+        self.map_center_lat = 0.0
+        self.map_center_lon = 0.0
+        self.map_initialized_from_gps = False
+        self.map_pending_tile_key = None
+        self.map_current_tile_key = None
+        self.map_zoom_level = DEFAULT_OSM_ZOOM
+        self.clear_map_tile_queues()
+        if hasattr(self, "map_image_artists"):
+            self.clear_map_background()
         self.last_plot_time = 0.0
         for value in self.live_values.values():
             value.set("-")
+        self.gps_status_var.set("satellite not connected")
+        if self.gps_status_label is not None:
+            self.gps_status_label.configure(fg="#ef4444")
+        if hasattr(self, "map_ax") and self.mode_var.get() == MODE_TELEMETRY:
+            self.update_map_plot()
         self.update_simulation_plot()
 
     def start_reader(self) -> None:
@@ -751,9 +977,13 @@ class RocketPanelApp:
             elif event.kind == "static":
                 self.handle_static_sample(event.payload)
 
+        self.process_map_tile_responses()
+
         now = time.time()
         if now - self.last_plot_time > 0.1:
             self.update_graph()
+            if self.mode_var.get() == MODE_TELEMETRY:
+                self.update_map_plot()
             self.update_simulation_plot()
             self.last_plot_time = now
 
@@ -770,6 +1000,22 @@ class RocketPanelApp:
         side, forward, spin = self.rocket_estimator.update(sample)
         self.orientation = (side, forward, spin)
 
+        if sample["gps_connected"]:
+            if not self.map_initialized_from_gps:
+                self.gps_path = []
+                self.map_center_lat = sample["latitude"]
+                self.map_center_lon = sample["longitude"]
+                self.map_initialized_from_gps = True
+
+            self.gps_path.append((sample["latitude"], sample["longitude"]))
+            self.gps_status_var.set("satellite connected")
+            if self.gps_status_label is not None:
+                self.gps_status_label.configure(fg="#22c55e")
+        else:
+            self.gps_status_var.set("satellite not connected")
+            if self.gps_status_label is not None:
+                self.gps_status_label.configure(fg="#ef4444")
+
         values = {
             "samples": len(self.samples),
             "time_s": sample["time_s"],
@@ -782,6 +1028,10 @@ class RocketPanelApp:
             "temperature_c": sample["temperature_c"],
             "pressure_hpa": sample["pressure_hpa"],
             "altitude_m": sample["altitude_m"],
+            "gps_altitude_m": sample["gps_altitude_m"],
+            "latitude": sample["latitude"],
+            "longitude": sample["longitude"],
+            "connected_satellites": sample["gps_satellites"],
             "roll_deg": math.degrees(forward),
             "pitch_deg": math.degrees(side),
             "yaw_deg": math.degrees(spin),
@@ -813,7 +1063,14 @@ class RocketPanelApp:
         for key, value in values.items():
             if key not in self.live_values:
                 continue
-            if isinstance(value, float):
+            if value is None:
+                if key == "gps_altitude_m":
+                    self.live_values[key].set("waiting")
+                else:
+                    self.live_values[key].set("-")
+            elif key in ("latitude", "longitude"):
+                self.live_values[key].set(f"{value:.4f}")
+            elif isinstance(value, float):
                 self.live_values[key].set(f"{value:.3f}")
             else:
                 self.live_values[key].set(str(value))
@@ -827,7 +1084,7 @@ class RocketPanelApp:
         if self.mode_var.get() == MODE_TELEMETRY:
             x_data = [item["time_s"] for item in visible_samples]
             for key, line in self.lines.items():
-                line.set_data(x_data, [item[key] for item in visible_samples])
+                line.set_data(x_data, [self.graph_value(item.get(key)) for item in visible_samples])
             for axis in self.axes:
                 axis.relim()
                 axis.autoscale_view()
@@ -839,6 +1096,301 @@ class RocketPanelApp:
             self.axes[0].autoscale_view()
 
         self.canvas.draw_idle()
+
+    @staticmethod
+    def graph_value(value):
+        if value is None:
+            return math.nan
+        return value
+
+    def update_map_plot(self) -> None:
+        if not hasattr(self, "gps_route_line"):
+            return
+
+        if not self.gps_path:
+            self.gps_route_line.set_data([], [])
+            self.gps_current_point.set_data([], [])
+            self.clear_map_background()
+            lon_span, lat_span = self.map_spans_for_zoom(self.map_center_lat, self.map_zoom_level)
+            self.set_map_view(
+                self.map_center_lat,
+                self.map_center_lon,
+                lat_span,
+                lon_span,
+            )
+            self.map_text.set_visible(True)
+            self.map_text.set_text(f"{self.map_center_lat:.6f}, {self.map_center_lon:.6f}\nWaiting for GPS fix")
+            self.map_text.set_color("#ef4444")
+            self.update_map_info()
+            self.map_canvas.draw_idle()
+            return
+
+        latitudes = [point[0] for point in self.gps_path]
+        longitudes = [point[1] for point in self.gps_path]
+
+        self.gps_route_line.set_data(longitudes, latitudes)
+        self.gps_current_point.set_data([longitudes[-1]], [latitudes[-1]])
+        self.map_text.set_visible(False)
+
+        latest_lat = latitudes[-1]
+        latest_lon = longitudes[-1]
+        center_distance = gps_distance_m(self.map_center_lat, self.map_center_lon, latest_lat, latest_lon)
+
+        if center_distance >= MAP_CENTER_UPDATE_THRESHOLD_M:
+            self.map_center_lat = latest_lat
+            self.map_center_lon = latest_lon
+
+        lon_span, lat_span = self.map_spans_for_zoom(self.map_center_lat, self.map_zoom_level)
+        self.set_map_view(self.map_center_lat, self.map_center_lon, lat_span, lon_span)
+
+        lon_min, lon_max = self.map_ax.get_xlim()
+        lat_min, lat_max = self.map_ax.get_ylim()
+        self.request_map_background(lat_min, lat_max, lon_min, lon_max)
+        self.update_map_info()
+        self.map_canvas.draw_idle()
+
+    def set_map_view(self, center_lat: float, center_lon: float, lat_span: float, lon_span: float) -> None:
+        lat_span = max(lat_span, 0.00005)
+        lon_span = max(lon_span, 0.00005)
+        self.map_ax.set_xlim(center_lon - lon_span / 2.0, center_lon + lon_span / 2.0)
+        self.map_ax.set_ylim(center_lat - lat_span / 2.0, center_lat + lat_span / 2.0)
+
+    def map_spans_for_zoom(self, center_lat: float, zoom: int) -> tuple[float, float]:
+        widget_width = max(self.map_widget.winfo_width(), OSM_TILE_SIZE_PX)
+        widget_height = max(self.map_widget.winfo_height(), OSM_TILE_SIZE_PX)
+        visible_tiles_x = max(widget_width / OSM_TILE_SIZE_PX, 1.0)
+        visible_tiles_y = max(widget_height / OSM_TILE_SIZE_PX, 1.0)
+
+        tile_lon_span = 360.0 / (2 ** zoom)
+        lat_scale = max(math.cos(math.radians(center_lat)), 0.2)
+        lon_span = max(tile_lon_span * visible_tiles_x, MIN_MAP_VIEW_SPAN_DEG)
+        lat_span = max(tile_lon_span * lat_scale * visible_tiles_y, MIN_MAP_VIEW_SPAN_DEG)
+        return lon_span, lat_span
+
+    def update_map_info(self) -> None:
+        if not hasattr(self, "map_ax"):
+            return
+
+        lon_min, lon_max = self.map_ax.get_xlim()
+        lat_min, lat_max = self.map_ax.get_ylim()
+        center_lat = (lat_min + lat_max) / 2.0
+        center_lon = (lon_min + lon_max) / 2.0
+
+        self.map_info_var.set(f"center: {center_lat:.5f}, {center_lon:.5f} | zoom: {self.map_zoom_level}")
+
+    def on_map_scroll(self, event) -> None:
+        if event.inaxes != self.map_ax:
+            return
+
+        zoom_delta = 1 if event.button == "up" else -1
+        new_zoom = max(MIN_OSM_ZOOM, min(MAX_OSM_ZOOM, self.map_zoom_level + zoom_delta))
+
+        if new_zoom == self.map_zoom_level:
+            self.update_map_info()
+            return
+
+        x_min, x_max = self.map_ax.get_xlim()
+        y_min, y_max = self.map_ax.get_ylim()
+        center_lon = (x_min + x_max) / 2.0
+        center_lat = (y_min + y_max) / 2.0
+        new_width, new_height = self.map_spans_for_zoom(center_lat, new_zoom)
+
+        self.map_zoom_level = new_zoom
+        self.set_map_view(center_lat, center_lon, new_height, new_width)
+
+        lon_min, lon_max = self.map_ax.get_xlim()
+        lat_min, lat_max = self.map_ax.get_ylim()
+        self.request_map_background(lat_min, lat_max, lon_min, lon_max, force=True)
+        self.update_map_info()
+        self.map_canvas.draw_idle()
+
+    def clear_map_background(self) -> None:
+        for artist in self.map_image_artists:
+            artist.remove()
+        self.map_image_artists = []
+        self.map_ax.grid(False)
+
+    def clear_map_tile_queues(self) -> None:
+        for tile_queue in (self.map_tile_request_queue, self.map_tile_response_queue):
+            while not tile_queue.empty():
+                try:
+                    tile_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+    def request_map_background(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        force: bool = False,
+    ) -> None:
+        if not self.map_tiles_enabled:
+            self.map_ax.grid(True, color="#303642")
+            return
+
+        request = self.build_tile_request(lat_min, lat_max, lon_min, lon_max)
+        if request is None:
+            self.map_ax.grid(True, color="#303642")
+            return
+
+        request_key = request["key"]
+        now = time.time()
+
+        if request_key == self.map_current_tile_key or request_key == self.map_pending_tile_key:
+            return
+
+        if not force and now - self.map_last_tile_request_time < MAP_TILE_THROTTLE_SECONDS:
+            return
+
+        self.map_pending_tile_key = request_key
+        self.map_last_tile_request_time = now
+
+        while not self.map_tile_request_queue.empty():
+            try:
+                self.map_tile_request_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self.map_tile_request_queue.put(request)
+
+    def apply_map_background(self, response: dict) -> None:
+        if response["key"] != self.map_pending_tile_key:
+            return
+
+        for artist in self.map_image_artists:
+            artist.remove()
+        self.map_image_artists = []
+
+        tiles = response["tiles"]
+
+        if not tiles:
+            self.map_ax.grid(True, color="#303642")
+            self.map_pending_tile_key = None
+            return
+
+        for image, extent in tiles:
+            artist = self.map_ax.imshow(
+                image,
+                extent=extent,
+                origin="upper",
+                alpha=1.0,
+                zorder=0,
+                interpolation="nearest",
+                aspect="auto",
+            )
+            self.map_image_artists.append(artist)
+
+        self.map_ax.grid(False)
+        self.gps_route_line.set_zorder(3)
+        self.gps_current_point.set_zorder(4)
+        self.map_current_tile_key = response["key"]
+        self.map_pending_tile_key = None
+        self.map_canvas.draw_idle()
+
+    def process_map_tile_responses(self) -> None:
+        latest_response = None
+
+        while True:
+            try:
+                latest_response = self.map_tile_response_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if latest_response is not None:
+            self.apply_map_background(latest_response)
+
+    def map_tile_worker(self) -> None:
+        while True:
+            request = self.map_tile_request_queue.get()
+            tiles = []
+
+            for tile_x, tile_y, zoom in request["tiles"]:
+                tile = self.get_osm_tile(tile_x, tile_y, zoom)
+                if tile is not None:
+                    tiles.append(tile)
+
+            self.map_tile_response_queue.put({
+                "key": request["key"],
+                "tiles": tiles,
+            })
+
+    def build_tile_request(self, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> Optional[dict]:
+        zoom = self.map_zoom_level
+        north_west_x, north_west_y = self.lat_lon_to_tile(lat_max, lon_min, zoom)
+        south_east_x, south_east_y = self.lat_lon_to_tile(lat_min, lon_max, zoom)
+        x_start = min(north_west_x, south_east_x)
+        x_end = max(north_west_x, south_east_x)
+        y_start = min(north_west_y, south_east_y)
+        y_end = max(north_west_y, south_east_y)
+        tile_count = (x_end - x_start + 1) * (y_end - y_start + 1)
+
+        if tile_count > MAX_MAP_TILES:
+            return None
+
+        tiles = [
+            (tile_x, tile_y, zoom)
+            for tile_x in range(x_start, x_end + 1)
+            for tile_y in range(y_start, y_end + 1)
+        ]
+
+        if not tiles:
+            return None
+
+        return {
+            "key": (
+                zoom,
+                x_start,
+                x_end,
+                y_start,
+                y_end,
+            ),
+            "tiles": tiles,
+        }
+
+    def get_osm_tile(self, tile_x: int, tile_y: int, zoom: int):
+        cache_key = (zoom, tile_x, tile_y)
+
+        if cache_key in self.map_tile_cache:
+            return self.map_tile_cache[cache_key]
+
+        url = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
+
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "thrust-calc-panel/1.0"})
+            with urllib.request.urlopen(request, timeout=3.0) as response:
+                image_data = response.read()
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return None
+
+        image = mpimg.imread(io.BytesIO(image_data), format="png")
+        north, west = self.tile_to_lat_lon(tile_x, tile_y, zoom)
+        south, east = self.tile_to_lat_lon(tile_x + 1, tile_y + 1, zoom)
+        extent = [west, east, south, north]
+        tile = (image, extent)
+        self.map_tile_cache[cache_key] = tile
+        return tile
+
+    @staticmethod
+    def lat_lon_to_tile(latitude: float, longitude: float, zoom: int) -> tuple[int, int]:
+        latitude = max(min(latitude, 85.05112878), -85.05112878)
+        longitude = max(min(longitude, 180.0), -180.0)
+        lat_rad = math.radians(latitude)
+        tile_count = 2 ** zoom
+        tile_x = int((longitude + 180.0) / 360.0 * tile_count)
+        tile_y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * tile_count)
+        tile_x = max(0, min(tile_count - 1, tile_x))
+        tile_y = max(0, min(tile_count - 1, tile_y))
+        return tile_x, tile_y
+
+    @staticmethod
+    def tile_to_lat_lon(tile_x: int, tile_y: int, zoom: int) -> tuple[float, float]:
+        tile_count = 2 ** zoom
+        longitude = tile_x / tile_count * 360.0 - 180.0
+        lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * tile_y / tile_count)))
+        latitude = math.degrees(lat_rad)
+        return latitude, longitude
 
     def update_simulation_plot(self) -> None:
         side, forward, spin = self.orientation
@@ -960,6 +1512,11 @@ class RocketPanelApp:
                 "temperature_c",
                 "pressure_hpa",
                 "altitude_m",
+                "latitude",
+                "longitude",
+                "gps_satellites",
+                "gps_altitude_m",
+                "gps_connected",
             ]
             self.write_csv(csv_path, fieldnames, self.samples)
         else:
@@ -979,7 +1536,7 @@ class RocketPanelApp:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for row in rows:
-                writer.writerow({field: row.get(field, "") for field in fieldnames})
+                writer.writerow({field: "" if row.get(field) is None else row.get(field, "") for field in fieldnames})
 
     def toggle_fullscreen(self, _event=None) -> None:
         self.fullscreen = not self.fullscreen
